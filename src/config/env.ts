@@ -12,6 +12,7 @@ export type Env = {
   OPENAI_MODEL: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  SUPABASE_DB_URL: string;
 };
 
 function readNodeEnv(value: string | undefined): Env["NODE_ENV"] {
@@ -32,5 +33,6 @@ export const env: Env = Object.freeze({
   OPENAI_MODEL: process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini",
   SUPABASE_URL: process.env.SUPABASE_URL ?? "",
   SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+  SUPABASE_DB_URL: process.env.SUPABASE_DB_URL ?? "",
 });
 

@@ -11,6 +11,12 @@ dailyTasksRouter.get(
   dailyTasksController.getDailyTasks,
 );
 
+dailyTasksRouter.post(
+  "/daily-tasks/translate",
+  requireAuth,
+  dailyTasksController.translateDailyTasks,
+);
+
 dailyTasksRouter.patch(
   "/daily-tasks/:id",
   requireAuth,

@@ -4,6 +4,10 @@ import {
   pickApproxSnellen,
   sortRowsByCapturedAt,
 } from "../lib/near-vision";
+import {
+  fallbackInsightCopy,
+  normalizeInsightLocale,
+} from "./near-vision-insight-fallbacks";
 import type {
   NearVisionInsight,
   NearVisionResultRow,
@@ -18,15 +22,19 @@ type BuildNearVisionInsightInput = {
 function buildFallbackInsight(
   rows: NearVisionResultRow[],
   periodDays: number,
+  locale?: string,
 ): NearVisionInsight {
+  const resolvedLocale = normalizeInsightLocale(locale);
+  const copy = fallbackInsightCopy(resolvedLocale);
   const generatedAt = new Date().toISOString();
   if (rows.length === 0) {
     return {
-      title: "Not enough data yet",
-      body: `Complete a few more near vision tests over the next ${periodDays} days to unlock a personalized trend analysis.`,
+      title: copy.emptyTitle,
+      body: copy.emptyBody(periodDays),
       sampleCount: 0,
       periodDays,
       generatedAt,
+      locale: resolvedLocale,
     };
   }
 
@@ -36,20 +44,20 @@ function buildFallbackInsight(
   const firstSnellen = pickApproxSnellen(first);
   const latestSnellen = pickApproxSnellen(latest);
 
-  // Use nSize for delta if available; fall back to sample-count framing only.
   const firstN = first.both_result?.nSize ?? first.right_result?.nSize ?? first.left_result?.nSize ?? null;
   const latestN = latest.both_result?.nSize ?? latest.right_result?.nSize ?? latest.left_result?.nSize ?? null;
   const deltaN = firstN != null && latestN != null ? latestN - firstN : 0;
 
-  const trendLabel =
-    deltaN >= 2 ? "declined" : deltaN <= -2 ? "improved" : "stayed relatively stable";
+  const trend: "declined" | "improved" | "stable" =
+    deltaN >= 2 ? "declined" : deltaN <= -2 ? "improved" : "stable";
 
   return {
-    title: `Last ${periodDays} days: your near vision ${trendLabel}`,
-    body: `We analyzed ${sorted.length} test result(s). Your latest value is ${latestSnellen} (first: ${firstSnellen}). Keep test conditions consistent and repeat checks every few days for a more reliable trend.`,
+    title: copy.trendTitle(periodDays, trend),
+    body: copy.trendBody(sorted.length, latestSnellen, firstSnellen),
     sampleCount: sorted.length,
     periodDays,
     generatedAt,
+    locale: resolvedLocale,
   };
 }
 
@@ -80,11 +88,10 @@ function buildPrompt(input: BuildNearVisionInsightInput): string {
 async function buildNearVisionInsight(
   input: BuildNearVisionInsightInput,
 ): Promise<NearVisionInsight> {
-  // Skip the AI call entirely when there's nothing to summarize or the API
-  // key isn't configured — fall back to the deterministic template instead
-  // of surfacing a 503 here (this endpoint is best-effort, not blocking).
+  const resolvedLocale = normalizeInsightLocale(input.locale);
+
   if (input.rows.length === 0 || !env.OPENAI_API_KEY) {
-    return buildFallbackInsight(input.rows, input.periodDays);
+    return buildFallbackInsight(input.rows, input.periodDays, resolvedLocale);
   }
 
   try {
@@ -106,13 +113,13 @@ async function buildNearVisionInsight(
     const text = (completion.choices[0]?.message?.content ?? "").trim();
     const parsed = JSON.parse(text) as { title?: unknown; body?: unknown };
     if (typeof parsed.title !== "string" || typeof parsed.body !== "string") {
-      return buildFallbackInsight(input.rows, input.periodDays);
+      return buildFallbackInsight(input.rows, input.periodDays, resolvedLocale);
     }
 
     const title = parsed.title.trim();
     const body = parsed.body.trim();
     if (!title || !body) {
-      return buildFallbackInsight(input.rows, input.periodDays);
+      return buildFallbackInsight(input.rows, input.periodDays, resolvedLocale);
     }
 
     return {
@@ -121,9 +128,10 @@ async function buildNearVisionInsight(
       sampleCount: input.rows.length,
       periodDays: input.periodDays,
       generatedAt: new Date().toISOString(),
+      locale: resolvedLocale,
     };
   } catch {
-    return buildFallbackInsight(input.rows, input.periodDays);
+    return buildFallbackInsight(input.rows, input.periodDays, resolvedLocale);
   }
 }
 

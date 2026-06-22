@@ -11,14 +11,25 @@ import {
 import {
   nearVisionResultsService,
   type NearVisionEyeResult,
-  type NearVisionInsight,
   type NearVisionResultRow,
+  type SightDistanceStatus,
 } from "../services/near-vision-results.service";
+import {
+  mergeInsightIntoCache,
+  pickCachedInsight,
+  readInsightCache,
+  serializeInsightCache,
+} from "../services/near-vision-insight-cache";
 import { nearVisionInsightService } from "../services/near-vision-insight.service";
+import { normalizeInsightLocale } from "../services/near-vision-insight-fallbacks";
 
 const ALLOWED_EYES = new Set(["left", "right", "both"] as const);
+const ALLOWED_SIGHT_STATUSES = new Set<SightDistanceStatus>([
+  "shortSighted",
+  "longSighted",
+  "normal",
+]);
 
-const INSIGHT_REFRESH_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_LIST_LIMIT = 120;
 const MAX_LIST_LIMIT = 500;
 const DEFAULT_INSIGHT_DAYS = 30;
@@ -60,32 +71,22 @@ function parseEyeResult(
   };
 }
 
-function parseStoredInsight(
-  raw: string | null | undefined,
-): NearVisionInsight | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (
-      typeof parsed.title !== "string" ||
-      typeof parsed.body !== "string" ||
-      typeof parsed.sampleCount !== "number" ||
-      typeof parsed.periodDays !== "number" ||
-      typeof parsed.generatedAt !== "string" ||
-      !Number.isFinite(Date.parse(parsed.generatedAt))
-    ) {
-      return null;
-    }
-    return {
-      title: parsed.title.trim(),
-      body: parsed.body.trim(),
-      sampleCount: parsed.sampleCount,
-      periodDays: parsed.periodDays,
-      generatedAt: parsed.generatedAt,
-    };
-  } catch {
-    return null;
+function parseAverageDistanceCm(raw: unknown): number | null {
+  if (raw == null) return null;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+    throw badRequest("averageDistanceCm must be a positive number when provided");
   }
+  return raw;
+}
+
+function parseSightDistanceStatus(raw: unknown): SightDistanceStatus | null {
+  if (raw == null) return null;
+  if (typeof raw !== "string" || !ALLOWED_SIGHT_STATUSES.has(raw as SightDistanceStatus)) {
+    throw badRequest(
+      'sightDistanceStatus must be one of "shortSighted", "longSighted", or "normal" when provided',
+    );
+  }
+  return raw as SightDistanceStatus;
 }
 
 function pickLatestRow(rows: NearVisionResultRow[]): NearVisionResultRow | null {
@@ -103,6 +104,16 @@ const saveNearResults: RequestHandler = async (req, res, next) => {
     const right = parseEyeResult("right", body.right);
     const left = parseEyeResult("left", body.left);
     const both = parseEyeResult("both", body.both);
+    const averageDistanceCm = parseAverageDistanceCm(body.averageDistanceCm);
+    const sightDistanceStatus = parseSightDistanceStatus(body.sightDistanceStatus);
+
+    if (
+      (averageDistanceCm == null) !== (sightDistanceStatus == null)
+    ) {
+      throw badRequest(
+        "averageDistanceCm and sightDistanceStatus must both be provided or both omitted",
+      );
+    }
 
     const row = await nearVisionResultsService.save({
       userId,
@@ -110,6 +121,8 @@ const saveNearResults: RequestHandler = async (req, res, next) => {
       right,
       left,
       both,
+      averageDistanceCm,
+      sightDistanceStatus,
     });
 
     res.status(201).json({ ok: true, data: row });
@@ -142,6 +155,7 @@ const getNearResultsInsight: RequestHandler = async (req, res, next) => {
       max: MAX_INSIGHT_DAYS,
     });
     const locale = parseLocale(req.query.locale);
+    const requestLocale = normalizeInsightLocale(locale);
     const sinceIso = new Date(
       Date.now() - days * 24 * 60 * 60 * 1000,
     ).toISOString();
@@ -152,13 +166,16 @@ const getNearResultsInsight: RequestHandler = async (req, res, next) => {
       240,
     );
     const latestRow = pickLatestRow(rows);
+    const sampleCount = rows.length;
+    const cache = readInsightCache(latestRow?.ai_summary);
+    const cached = pickCachedInsight(
+      cache,
+      requestLocale,
+      days,
+      sampleCount,
+    );
 
-    const cached = parseStoredInsight(latestRow?.ai_summary);
-    const isFreshCache =
-      cached != null &&
-      Date.now() - Date.parse(cached.generatedAt) < INSIGHT_REFRESH_MS;
-
-    if (isFreshCache) {
+    if (cached) {
       res.status(200).json({ ok: true, data: cached });
       return;
     }
@@ -166,13 +183,14 @@ const getNearResultsInsight: RequestHandler = async (req, res, next) => {
     const insight = await nearVisionInsightService.buildNearVisionInsight({
       rows,
       periodDays: days,
-      ...(locale ? { locale } : {}),
+      locale: requestLocale,
     });
 
     if (latestRow) {
+      const nextCache = mergeInsightIntoCache(cache, insight);
       await nearVisionResultsService.updateAiSummaryById(
         latestRow.id,
-        JSON.stringify(insight),
+        serializeInsightCache(nextCache),
       );
     }
 

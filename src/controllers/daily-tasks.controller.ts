@@ -8,28 +8,30 @@ import {
   requireUserId,
 } from "../lib/http";
 import { dailyTasksService } from "../services/daily-tasks.service";
+import { dailyTasksTranslateService } from "../services/daily-tasks-translate.service";
 
 /**
- * GET /vision/daily-tasks?date=YYYY-MM-DD&locale=…
+ * GET /vision/daily-tasks?date=YYYY-MM-DD&today=YYYY-MM-DD
  *
- * Strict "create once per day" semantics: if there are no rows for
- * `(userId, planDate)` yet, the service runs OpenAI once and persists the
- * result. Every subsequent call for the same day simply re-reads the saved
- * rows — never regenerates.
- *
- * The query `locale` is just a hint used when `public.onboarding.language`
- * is `'system'` or missing; otherwise the onboarding value is authoritative.
+ * Ensures one English-source task plan exists for `(userId, planDate)`.
+ * Tasks are generated only when `date` equals `today` (client local calendar
+ * day); past and future dates return stored rows without generation.
+ * Localized copy is created lazily via POST /daily-tasks/translate.
  */
 const getDailyTasks: RequestHandler = async (req, res, next) => {
   try {
     const userId = requireUserId(req);
     const planDate = parseIsoDate(req.query.date);
-    const requestLocale = parseLocale(req.query.locale);
+    const rawToday = req.query.today;
+    const clientToday =
+      typeof rawToday === "string" && rawToday.trim().length > 0
+        ? parseIsoDate(rawToday, "today")
+        : undefined;
 
     const tasks = await dailyTasksService.ensureForDate({
       userId,
       planDate,
-      ...(requestLocale ? { requestLocale } : {}),
+      clientToday,
     });
 
     res.status(200).json({ ok: true, data: tasks });
@@ -65,7 +67,49 @@ const updateDailyTask: RequestHandler = async (req, res, next) => {
   }
 };
 
+const translateDailyTasks: RequestHandler = async (req, res, next) => {
+  try {
+    requireUserId(req);
+    const body = isPlainObject(req.body) ? req.body : {};
+    const locale = parseLocale(body.locale);
+    if (!locale) {
+      throw badRequest("`locale` is required");
+    }
+
+    const rawTasks = body.tasks;
+    if (!Array.isArray(rawTasks) || rawTasks.length === 0) {
+      throw badRequest("`tasks` must be a non-empty array");
+    }
+
+    const tasks = rawTasks
+      .map((entry) => {
+        if (!isPlainObject(entry)) return null;
+        const id = typeof entry.id === "string" ? entry.id.trim() : "";
+        const title = typeof entry.title === "string" ? entry.title.trim() : "";
+        const description =
+          typeof entry.description === "string" ? entry.description.trim() : "";
+        if (!id || !title || !description) return null;
+        return { id, title, description };
+      })
+      .filter((entry): entry is { id: string; title: string; description: string } => entry != null);
+
+    if (tasks.length === 0) {
+      throw badRequest("Each task needs id, title, and description");
+    }
+
+    const translations = await dailyTasksTranslateService.translateDailyTasks({
+      locale,
+      tasks,
+    });
+
+    res.status(200).json({ ok: true, data: translations });
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const dailyTasksController = {
   getDailyTasks,
+  translateDailyTasks,
   updateDailyTask,
 };
